@@ -33,23 +33,6 @@ sys.setdefaultencoding('utf8')
 
 HIDE_PREMIUM_CONTENT = True
 
-REMOTE_DBG = False
-
-# append pydev remote debugger
-if REMOTE_DBG:
-    # Make pydev debugger works for auto reload.
-    # Note pydevd module need to be copied in XBMC\system\python\Lib\pysrc
-    try:
-        sys.path.append('/home/jz/.eclipse/org.eclipse.platform_3.8_155965261/plugins/org.python.pydev_4.4.0.201510052309/pysrc')
-        import pydevd
-        #import pysrc.pydevd as pydevd # with the addon script.module.pydevd, only use `import pydevd`
-    # stdoutToServer and stderrToServer redirect stdout and stderr to eclipse console
-        pydevd.settrace('localhost', port=1234, stdoutToServer=True, stderrToServer=True)
-    except ImportError:
-        sys.stderr.write("Error: " +
-            "You must add org.python.pydev.debug.pysrc to your PYTHONPATH.")
-        sys.exit(1)
-
 def getEpisodesLink(seriesId):
 	episodesLinkTemplate = "http://www.ruutu.fi/component/690/update?series=SERIESID&media_type=video_episode&orderby=sequence&order_direction=desc"
 	return episodesLinkTemplate.replace('SERIESID', seriesId)
