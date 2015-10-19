@@ -490,30 +490,6 @@ class RuutuAddon(xbmcUtil.ViewAddonAbstract):
 		if link != '':
 			self.listItems(scrapInline(link, self.bitrate, pg), pg, args, 'time', True)
 			
-# 	def handleExternal(self, params):
-# 		def getVideoId(url):
-# 			urlRegex = r"(?:http|https):\/\/(?:www.){0,1}ruutu.fi\/video\/(\d{1,9})"
-# 			match = re.match(urlRegex, url)
-# 			if match and match.group(1):
-# 				# returns the video ID
-# 				return match.group(1)
-# 			else:
-# 				# unrecognized, won't work
-# 				return None
-# 		url = params.get('link')
-# 		videoId = getVideoId(url)
-# 		
-# 		if videoId:
-# 			details = getVideoDetails(videoId, self.bitrate)
-# 			self.playVideo(details.get('link'), { 'thumbnailImage': details.get('image'), 
-# 												'infoLabels': { 'Title': details.get('title'), 
-# 															'plot': details.get('desc'), 
-# 															'season': details.get('seasonNum'), 
-# 															'episode': details.get('episodeNum'), 
-# 															'airdate': details.get('published-ts'), 
-# 															'duration': details.get('duration') }
-# 												})
-
 	def handleSeries(self, pg, args):
 		link = args['link'] if 'link' in args else ''
 		if link != '':
