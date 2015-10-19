@@ -53,7 +53,12 @@ class ViewAddonAbstract:
 			link = getParam(params, "link")
 			self.playVideo(link)
 			return
-
+		
+		elif (view == 'external'):
+			hdlFunc = self.viewMap[view]
+			hdlFunc(params)
+			return
+		
 		try:
 			hdlFunc = self.viewMap[view]
 		except:
@@ -70,16 +75,23 @@ class ViewAddonAbstract:
 
 	def playVideo(self, link):
 		xbmc.log("Trying to play URL: " + link, 1)
-		resolvedVideoLink = self.handleVideo(link)
-		if (resolvedVideoLink != False):
-			if (resolvedVideoLink != None):
-				liz = xbmcgui.ListItem(path=resolvedVideoLink)
-				xbmcplugin.setResolvedUrl(int(sys.argv[1]), True, liz)
+		details = self.handleVideo(link)
+		videoUrl = details.get('link')
+		if videoUrl:
+			liz = None
+			info = details.get('info')
+			if info:
+				# build the listitem with additional info
+				liz = xbmcgui.ListItem(path=videoUrl, thumbnailImage=info.get('thumbnailImage'))
+				liz.setInfo(type='Video', infoLabels=info.get('infoLabels'))
 			else:
-				print ("could not play " + link)
-				notification(header="Warning", message="Could not find video.")
+				liz = xbmcgui.ListItem(path=videoUrl)
+			xbmcplugin.setResolvedUrl(int(sys.argv[1]), True, liz)
+		else:
+			print ("could not play " + link)
+			notification(header="Warning", message="Could not find video.")
 
-
+	# will be overridden on inheritance
 	def handleVideo(self, link):
 		return link
 
