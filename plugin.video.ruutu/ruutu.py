@@ -1,21 +1,26 @@
 # -*- coding: utf-8 -*-
 import urllib2
+from urllib2 import HTTPError
 import re
 import os
+
 import json
 import time
 from datetime import date, datetime
 import sys
-import string
+import math
 
 import xbmcplugin
 import CommonFunctions
 import xbmcutil as xbmcUtil
 from bs4 import BeautifulSoup
+import xbmcgui
 
-xbmc.log(">>> Running in Python {0}".format(sys.version))
+import SimpleDownloader as downloader
 
 dbg = True
+downloader.dbg = True
+import string
 
 common = CommonFunctions
 common.plugin = "plugin.video.ruutu"
@@ -26,456 +31,564 @@ USER_AGENT = 'Mozilla/5.0 (Windows; U; Windows NT 5.1; en-GB; rv:1.9.0.3) Gecko/
 reload(sys)
 sys.setdefaultencoding('utf8')
 
+HIDE_PREMIUM_CONTENT = True
 
-def scrapRSS(url):
-    req = urllib2.Request(url)
-    req.add_header('User-Agent', USER_AGENT)
-    response = urllib2.urlopen(req)
-    content = response.read()
-    response.close()
-    match = re.compile("<item>.*?<title>(.*?)</title>.*?<link>(.*?)</link>.*?" +
-                       "<description>.*?src='(.*?)'.*?br/&gt;(.*?)</description>" +
-                       ".*?<pubDate>(.*?)</pubDate>.*?</item>",
-                       re.DOTALL).findall(content)
-    # title, link, img, description, date
-    return match
+REMOTE_DBG = False
 
+# append pydev remote debugger
+if REMOTE_DBG:
+    # Make pydev debugger works for auto reload.
+    # Note pydevd module need to be copied in XBMC\system\python\Lib\pysrc
+    try:
+        sys.path.append('/home/jz/.eclipse/org.eclipse.platform_3.8_155965261/plugins/org.python.pydev_4.4.0.201510052309/pysrc')
+        import pydevd
+        #import pysrc.pydevd as pydevd # with the addon script.module.pydevd, only use `import pydevd`
+    # stdoutToServer and stderrToServer redirect stdout and stderr to eclipse console
+        pydevd.settrace('localhost', port=1234, stdoutToServer=True, stderrToServer=True)
+    except ImportError:
+        sys.stderr.write("Error: " +
+            "You must add org.python.pydev.debug.pysrc to your PYTHONPATH.")
+        sys.exit(1)
 
-def scrapVideoId(url):
-    req = urllib2.Request(url)
-    req.add_header('User-Agent', USER_AGENT)
-    response = urllib2.urlopen(req)
-    matchVideoId = re.compile("vid=(.*)").findall(response.geturl())
+def getEpisodesLink(seriesId):
+	episodesLinkTemplate = "http://www.ruutu.fi/component/690/update?series=SERIESID&media_type=video_episode&orderby=sequence&order_direction=desc"
+	return episodesLinkTemplate.replace('SERIESID', seriesId)
 
-    response.close()
-    return matchVideoId[0]
-
-
-def scrapVideoLink(url):
-    xbmc.log(url)  # NOQA
-    req = urllib2.Request(url)
-    req.add_header('User-Agent', USER_AGENT)
-    response = urllib2.urlopen(req)
-    content = response.read()
-    response.close()
-
-    matchVideoId = re.compile('ruutuplayer\(.*"(http.*?)"').findall(content)
-    if len(matchVideoId) == 0:
-        matchVideoId = re.compile("providerURL', '(http.*?)'").findall(content)
-    if len(matchVideoId) == 0:
-        matchVideoId = re.compile("<!-- (http.*?) -->").findall(content)
-
-    if len(matchVideoId) == 0:
-        return None
-
-    videoUrl = urllib2.unquote(matchVideoId[0])
-
-    req = urllib2.Request(videoUrl)
-    req.add_header('User-Agent', USER_AGENT)
-    response = urllib2.urlopen(req)
-    regexp = "(http://)(.*)(/playlist.m3u8)"
-    regexp = re.compile(regexp, re.IGNORECASE)
-    videoLink = regexp.search(response.read())
-
-    return videoLink.group(0)
-
+def checkLinkOffset(link, pageSize, pg):
+	if pg >= 2:
+		# offset the listing by pageSize
+		link += "&offset=%s" % str((pg-1)*pageSize)
 
 def downloadVideo(url, title):
-    valid_chars = "-_.() %s%s" % (string.ascii_letters, string.digits)
-    videoUrl = scrapVideoLink(url)
+	def getFilename(title, url):
+		template = "TITLE_UNIQUEID.mp4"
+		valid_chars = "-_.() %s%s" % (string.ascii_letters, string.digits)
+		# picks the uniqueID from the video filename
+		urlRegex = r".*\/video/\d{1,4}/carbon_(\d{1,8})_(?:\d{4})_none.mp4"
+		filename = template.replace("TITLE", ''.join(c for c in title if c in valid_chars))
+		filename = filename.replace("UNIQUEID", re.match(urlRegex, url).group(1) if re.match(urlRegex, url) else '')
+		return filename
+	
+	downloadPath = ruutu.addon.getSetting('download-path')
+	if downloadPath is None or downloadPath == '':
+		return
+	downloadPath += url.split('/')[-2]
+	if not os.path.exists(downloadPath):
+		os.makedirs(downloadPath)
+	
+	filename = getFilename(title, url)
+	params = {"url": url, "download_path": downloadPath, "title": title}
+	xbmc.log(url + " " + filename + "   " + str(params))
+	dw = downloader.SimpleDownloader()
+	dw.download(filename, params)
+	
+def scrapInline(url, bitrate, pg=1):
+	def getContent(bs):
+		div = bs.find('div', {'data-content-id': True})
+		if not div:
+			return None
+		else:
+			isPremium = div.find('div', {'class': 'ruutuplus-text' }) is not None
+			if HIDE_PREMIUM_CONTENT and isPremium:
+				return None
+			videoId = div.get('data-content-id')
+			return getVideoDetails(videoId, bitrate, True)	
+		
+	# 	def getContentWithoutXMLQuery(bs):
+	# 		div = bs.find('div', {'data-content-id': True})
+	# 		if not div:
+	# 			return None
+	# 		else:
+	# 			isPremium = div.find('div', {'class': 'ruutuplus-text' }) is not None
+	# 			if isPremium:
+	# 				return None
+	# 			videoId = div.get('data-content-id')
+	# 			preTitle = div.find('div', {'class': 'thumbnail-pretitle'}).text
+	# 			title = div.find('div', {'class': 'thumbnail-title'}).text
+	# 			details = div.find('div', {'class': 'hoverbox-details'}).text.strip()
+	# 			imgUrl = div.find('img', attrs={'data-img_src_1': True}).get('data-img_src_3', '')
+	# 			timeLeft = div.find('div', {'class': 'time-left'}).text
 
-    downloadPath = ruutu.addon.getSetting('download-path')
-    if downloadPath is None or downloadPath == '':
-        return
-    downloadPath += url.split('/')[-2]
-    if not os.path.exists(downloadPath):
-        os.makedirs(downloadPath)
-
-    filename = "%s %s" % (''.join(
-        c for c in title if c in valid_chars), videoUrl.split(':')[-1])
-
-    params = {"url": videoUrl, "download_path": downloadPath}
-    xbmc.log(url + " " + filename + "   " + str(params))  # NOQA
-    dw = downloader.SimpleDownloader()  # NOQA
-    dw.download(filename, params)
+			
+		
+	resultObj = scrapJSON(url)
+	items = resultObj.get('items', [])
+	results = []
+	for item in items:
+		bs = BeautifulSoup(item, "html.parser")
+		content = getContent(bs)
+		if content:
+			results.append(content)
+	return results
 
 
-def scrapSeries(url, pg=1):
-    try:
-        # find serie id
-        req = urllib2.Request(url)
-        req.add_header('User-Agent', USER_AGENT)
-        response = urllib2.urlopen(req)
-        content = response.read()
-        response.close()
+def getVideoDetails(videoId, bitrate, isCategoryFetch=False):
+	def low(name):
+		return name.lower()
 
-        res = re.compile('episodes_1","args":\["(.*?)"\]').findall(content)
-        if len(res) > 0:
-            serieId = res[0]
-            url = "".join(["http://www.ruutu.fi/views_cacheable_pager/",
-                           'videos_by_series/episodes_1/',
-                           serieId, '?page=0%2C', str(pg - 1)])
-            return scrapPager(url)
-        else:
-            soup = BeautifulSoup(content, "html5lib")
-            section = soup.find(id='quicktabs-container-ruutu_series_episodes_by_season')
-            items = section.find_all('div', class_='views-row grid-3')
-            content = ''
-            for it in items:
-                content += str(it)
-            return scrapPagerContent(content)
-        # xbmcUtil.notification('Error', 'Could not find series')
-        # return None
-    except Exception as e:
-        xbmcUtil.notification('Error', str(e))
-        return None
+	def getModifiedVideoUrl(url):
+		return url.replace("_1000_", "_" + str(bitrate) + "_")
+	
+	def getTitle(description, name):
+		if not name or len(name) == 0:
+			# first sentence fom description is better than nothing
+			return description.split(".")[0]
+		else:
+			return name
+# 		try:
+# 			if isCategoryFetch:
+# 				return name
+# 			# syntax goes: "Kausi 2. Jakso 6/10. Episode name. Rest of description..."
+# 			return description.split(".")[2]
+# 		except Exception as e:
+# 			return name
+
+	def isPremium(xmlsoup):
+		return xmlsoup.find(low('PassthroughVariables')).find('variable', {'name': 'paid'}) == '1'
+	
+	def getDuration(xmlsoup):
+		runtimeEl = xmlsoup.find(low('Runtime'))
+		durationEl = xmlsoup.find(low('Duration'))
+		duration = None
+		
+		if runtimeEl and runtimeEl.text:
+			duration = runtimeEl.text or '0'
+		elif durationEl and durationEl.text:
+			duration = durationEl.text or '0'
+		return duration
+	
+	def getSeasonAndEpisodeNum(episodeCode):
+		retDict = {}
+		if episodeCode == 'NA':
+			retDict['episode'] = None
+			retDict['season'] = None
+		else:
+			epRegex1 = r'S(\d\d)E(\d\d)' # example: S04E12
+			epRegex2 = r'S(\d{4})E(\d{1,4})' # example: S2015E291
+			match1 = re.match(epRegex1, episodeCode)
+			match2 = re.match(epRegex2, episodeCode)
+			if match1:
+				retDict['season'] = match1.group(1)
+				retDict['episode'] = match1.group(2)
+			elif match2:
+				retDict['season'] = match2.group(1)
+				retDict['episode'] = match2.group(2)
+		return retDict
+	
+	def getPublishedTime(startTime):
+		format = '%d.%m.%Y %H:%M'
+		publishedTs = None
+		# to date object
+		# workaround for bug http://forum.kodi.tv/showthread.php?tid=112916
+		try:
+			publishedTs = datetime.strptime(startTime, format) if program.get('start_time') else None
+		except TypeError:
+			publishedTs = datetime(*(time.strptime(startTime, format)[0:6]))
+		finally:
+			return publishedTs
+	
+	try:
+		infoUrlTemplate = "http://gatling.nelonenmedia.fi/media-xml-cache?id=VIDEOID"
+		#videoPageTemplate = "http://www.ruutu.fi/video/VIDEOID"
+		
+		resDict = {}
+	
+		infoUrl = infoUrlTemplate.replace('VIDEOID', videoId)
+		#videoPage = videoPageTemplate.replace('VIDEOID', videoId)
+		
+		# start fetching the XML file
+		xbmc.log(infoUrl)
+		req = urllib2.Request(infoUrl)
+		req.add_header('User-Agent', USER_AGENT)
+		response = urllib2.urlopen(req)
+		content = response.read()
+		response.close()
+		
+		# workaround, cannot get xml parser to work -> html works but is all lowercase
+		xmlsoup = BeautifulSoup(content, "html.parser") #, 'lxml-xml')
+		
+		# no listing of premium content:
+		if HIDE_PREMIUM_CONTENT and isPremium(xmlsoup):
+			return None
+	
+		program = xmlsoup.find(low('Behavior')).find(low('Program'))
+		# extract the episode name for the listing:
+		episodeCode = xmlsoup.find(low('PassthroughVariables')).find('variable', {'name': 'episode_code'}).get('value')
+		epInfo = getSeasonAndEpisodeNum(episodeCode)
+		link = getModifiedVideoUrl(xmlsoup.find(low('HTTPMediaFile')).text)
+		image = xmlsoup.find(low('Startpicture')).get('href', '') if xmlsoup.find(low('Startpicture')) else ''
+		duration = getDuration(xmlsoup)
+		publishedTs = getPublishedTime(program.get('start_time'))
+		availabilityText = 'available-text'
+		available = 'available'
+		desc = program.get('description', '')
+		programName = program.get('program_name', '')
+		title = getTitle(desc, programName)
+		
+		resDict = {'title': title, 'seasonNum': epInfo.get('season'), 'episodeNum': epInfo.get('episode'), 'link': link, 'image': image, 'duration': duration,
+					'published-ts': publishedTs, 'available-text': availabilityText, 'available': available, 'desc': desc, 'details': programName}
+		
+		return resDict
+	except Exception as e:
+		xbmc.log("Error at fetching videoId = " + videoId + " -> skipped and exception handled.")
+		return None
 
 
-def scrapPager(url):
-    req = urllib2.Request(url)
-    req.add_header('User-Agent', USER_AGENT)
-    try:
-        response = urllib2.urlopen(req)
-        content = response.read()
-        response.close()
-        return scrapPagerContent(content)
-    except urllib2.HTTPError:
-        return []
+def scrapSeries(url, bitrate, pg=1):
+	def getContent(bs):
+		el = bs.find('div', { 'data-video-id': True })
+		if el:
+			# only need the videoid from the cache listing
+			videoId = el.get('data-video-id')
+			return getVideoDetails(videoId, bitrate)
+		else:
+			return None
+	
+# 	try:
+	resultObj = scrapJSON(url)
+	episodes = resultObj.get('items', [])
+	results = []
+	for episode in episodes:
+		bs = BeautifulSoup(episode, "html.parser")
+		isPremiumEpisode = bs.find('span', {'class': 'premium'}) is not None
+		if HIDE_PREMIUM_CONTENT and isPremiumEpisode:
+			pass
+		else:
+			content = getContent(bs)
+			if content:
+				results.append(content)
+	return results
+# 	except Exception as e:
+# 		return []
 
 
 def trimFromExtraSpaces(text):
-    try:
-        retVal = " ".join(text.split())
-    except:
-        retVal = ""
-    return retVal
-
-
-def scrapPagerContent(content):
-    xbmc.log(">>> titleLink: {0}".format(content))
-    retList = []
-    soup = BeautifulSoup(content, "html5lib")
-    items = soup.findAll('article')
-    for it in items:
-        image = it.find('img').get('src') if it.find('img') is not None else ''
-        link = it.select('h2 a')[0]['href']
-        title = trimFromExtraSpaces(it.select('h2 a')[0].string)
-        if len(title) == 0:
-            title = link
-        episodeNum = ''
-        seasonNum = ''
-
-        htmlSeason = it.select('.field-name-field-season')
-        if len(htmlSeason) > 0:
-            season = repr(htmlSeason[0])
-            season = re.compile(
-                'span>.+?([0-9]+[0-9]*?).*?</', re.DOTALL).findall(season)
-            if len(season) > 0:
-                seasonNum = season[0]
-
-        htmlEpisode = it.select('.field-name-field-episode')
-        if len(htmlEpisode) > 0:
-            episode = repr(htmlEpisode[0])
-            episode = re.compile(
-                'span>.+?([0-9]+[0-9]*?).*?</', re.DOTALL).findall(episode)
-            if len(episode) > 0:
-                episodeNum = episode[0]
-
-        selDuration = it.select('.field-name-field-duration')
-        duration = selDuration[0].string.strip() if len(
-            selDuration) > 0 else ''
-        duration = duration.replace(' min', '')
-
-        selAvailability = it.select('.availability-timestamp')
-        if len(selAvailability) > 0 and selAvailability[0].string is not None:
-            available = selAvailability[0].string.strip()
-        else:
-            available = '0'
-
-        selDesc = it.select('.field-name-field-webdescription p')
-        desc = selDesc[0].string.strip() if len(
-            selDesc) > 0 and selDesc[0].string is not None else '0'
-
-        selAvailabilityText = it.select('.availability-text')
-        if len(selAvailabilityText) > 0 and selAvailabilityText[0].string is not None:
-            availabilityText = selAvailabilityText[0].string.strip()
-        else:
-            availabilityText = ''
-        # desc += '\n\r' + availabilityText
-
-        selDetails = it.select('.details .field-type-text')
-        details = selDetails[0].string.strip() if len(
-            selDetails) > 0 and selDetails[0].string is not None else ''
-
-        selStartTime = it.select('.field-name-field-starttime')
-        publishedTs = None
-        if len(selStartTime) > 0:
-            for strippedString in selStartTime[0].stripped_strings:
-                published = strippedString
-                try:
-                    publishedTs = datetime.strptime(published, '%d.%m.%Y')
-                except TypeError:
-                    publishedTs = datetime(*(time.strptime(
-                        published, '%d.%m.%Y')[0:6]))
-        # search for duplicate
-        isDuplicate = False
-        for entry in retList:
-            if entry['link'] == "http://www.ruutu.fi" + link:
-                isDuplicate = True
-                break
-
-        if not isDuplicate:
-            retList.append(
-                {'title': title,
-                    'seasonNum': seasonNum,
-                    'episodeNum': episodeNum,
-                    'link': "http://www.ruutu.fi" + link,
-                    'image': image,
-                    'duration': duration,
-                    'published-ts': publishedTs,
-                    'available-text': availabilityText,
-                    'available': available,
-                    'desc': desc,
-                    'details': details})
-
-    return retList
-
+	try:
+		text = text.strip().replace('\n', '')
+	except:
+		text = ""
+	while "  " in text: text = text.replace('  ', ' ')
+	return text
 
 def scrapJSON(url):
-    req = urllib2.Request(url)
-    req.add_header('User-Agent', USER_AGENT)
-    try:
-        response = urllib2.urlopen(req)
-        content = response.read()
-        response.close()
-        jsonObj = json.loads(content)
-        return jsonObj
-    except urllib2.HTTPError:
-        return []
+	req = urllib2.Request(url)
+	req.add_header('User-Agent', USER_AGENT)
+	try:
+		response = urllib2.urlopen(req)
+		content = response.read()
+		response.close()
+		jsonObj = json.loads(content)
+		return jsonObj
+	except urllib2.HTTPError:
+		return []
 
 
 def scrapPrograms():
-    url = 'http://www.ruutu.fi/ajax/series-navi'
-    result = common.fetchPage({"link": url})
-    content = result['content']
-    match = re.compile("<li>(.*?)</li>", re.DOTALL).findall(content)
-
+    url = 'http://www.ruutu.fi/ruutu_search/published-series'
+    series = scrapJSON(url)
     retLinks = []
-    for m in match:
-        link = common.parseDOM(m, "a", {'href': '*'}, 'href')
-        name = common.parseDOM(m, "a", {'href': '*'})
-        if len(link) > 0 and "ruutuplus" not in m:
-            retLinks.append({'link': "http://www.ruutu.fi" + str(
-                link[0]), 'name': name[0]})
-
+    # for getting only the series ID
+    regex = r'\/series\/'
+    for serie in series:
+        seriesId = re.sub(regex, '', serie.get('value'))
+        retLinks.append({ 'name': serie.get('label'), 
+                         'seriesId': seriesId })
     return retLinks
 
-
 def formatDate(dt):
-    delta = date.today() - dt.date()
-    if delta.days == 0:
-        return lang(30004)
-    if delta.days == 1:
-        return lang(30010)
-    if 1 < delta.days < 5:
-        return dt.strftime('%A %d.%m.%Y')
-    return dt.strftime('%d.%m.%Y')
+	delta = date.today() - dt.date()
+	if delta.days == 0: return lang(30004)
+	if delta.days == 1: return lang(30010)
+	if 1 < delta.days < 5: return dt.strftime('%A %d.%m.%Y')
+	return dt.strftime('%d.%m.%Y')
 
 
 class RuutuAddon(xbmcUtil.ViewAddonAbstract):
-    ADDON_ID = 'plugin.video.ruutu'
+	ADDON_ID = 'plugin.video.ruutu'
 
-    def __init__(self):
-        xbmcUtil.ViewAddonAbstract.__init__(self)
-        self.REMOVE = u'[COLOR red][B]•[/B][/COLOR] %s' % self.lang(30019)
-        self.FAVOURITE = '[COLOR yellow][B]•[/B][/COLOR] %s'
-        self.EXPIRES_DAYS = u'[COLOR brown]%d' + self.lang(
-            30003) + '[/COLOR] %s'
-        self.EXPIRES_HOURS = u'[COLOR red]%d' + self.lang(
-            30002) + '[/COLOR] %s'
-        self.GROUP_FORMAT = u'   [COLOR blue]%s[/COLOR]'
-        self.NEXT = '[COLOR blue]   ➔  %s  ➔[/COLOR]' % self.lang(33078)
+	def __init__(self):
+		def getBitrate(value):
+			d = { '720p': '3000',
+				'576p': '1800',
+				'432p': '1000',
+				'288p': '600'
+				}
+			return d.get(value)
+		xbmcUtil.ViewAddonAbstract.__init__(self)
+		self.REMOVE = u'[COLOR red][B]•[/B][/COLOR] %s' % self.lang(30019)
+		self.FAVOURITE = '[COLOR yellow][B]•[/B][/COLOR] %s'
+		self.EXPIRES_DAYS = u'[COLOR brown]%d' + self.lang(30003) + '[/COLOR] %s'
+		self.EXPIRES_HOURS = u'[COLOR red]%d' + self.lang(30002) + '[/COLOR] %s'
+		self.GROUP_FORMAT = u'   [COLOR blue]%s[/COLOR]'
+		self.NEXT = '[COLOR blue]   >>> %s  >>>[/COLOR]' % self.lang(33078)
+		self.HIGHLIGHTED = "[COLOR green]  >> %s[/COLOR]"
 
-        self.addHandler(None, self.handleMain)
-        self.addHandler('category', self.handleCategory)
-        self.addHandler('serie', self.handleSeries)
-        self.addHandler('programs', self.handlePrograms)
-        self.favourites = {}
-        self.initFavourites()
-        self.enabledDownload = self.addon.getSetting(
-            "enable-download") == 'true'
+		self.addHandler(None, self.handleMain)
+		self.addHandler('inline', self.handleInline)
+		self.addHandler('category', self.handleCategory)
+		self.addHandler('serie', self.handleSeries)
+		self.addHandler('programs', self.handlePrograms)
+		self.addHandler('search', self.handleSearch)
+		self.favourites = {}
+		self.initFavourites()
+		self.enabledDownload = self.addon.getSetting("enable-download") == 'true'
+		self.bitrate = getBitrate(self.addon.getSetting("bitrate"))
 
-    def handleMain(self, pg, args):
-        self.addViewLink('›› ' + self.lang(30020), 'programs', 1)
-        self.addViewLink(self.lang(30028),
-                         'category',
-                         1,
-                         {'link': 'http://www.ruutu.fi/views_cacheable_pager/videos/block_1?page=0%2C',
-                             'grouping': True,
-                             'pg-size': 10})
-        self.addViewLink(self.lang(30030), 'category', 1,
-                         {'link': 'http://www.ruutu.fi/views_cacheable_pager/videos/block_6?page=0%2C0%2C0%2C0%2C',
-                             'pg-size': 10})  # yhden viikon ajalta
-        self.addViewLink(self.lang(30021), 'category', 1,
-                         {'link': 'http://www.ruutu.fi/views_cacheable_pager/' +
-                             'videos_by_series/episodes_1/164876?page=0%2C',
-                             'grouping': True, 'pg-size': 10})
-        self.addViewLink(self.lang(30027), 'category', 1,
-                         {'link': 'http://www.ruutu.fi/views_cacheable_pager/' +
-                             'videos/block_2?page=0%2C', 'grouping': True, 'pg-size': 10})
-        self.addViewLink(self.lang(30023), 'category', 1,
-                         {'link': 'http://www.ruutu.fi/views_cacheable_pager/' +
-                             'videos/block_3?page=0%2C', 'grouping': True, 'pg-size': 5})
-        self.addViewLink(self.lang(30029), 'category', 1,
-                         {'link': 'http://www.ruutu.fi/views_cacheable_pager/' +
-                             'theme_liftups/block_8/Ruoka?' +
-                             'page=0%2C0%2C0%2C0%2C0%2C0%2C0%2C0%2C0%2C0%2C0%2C', 'grouping': 'True'})
-        for title, link in self.favourites.items():
-            t = title
-            cm = [(self.createContextMenuAction(
-                self.REMOVE, 'removeFav', {'name': t}))]
-            self.addViewLink(self.FAVOURITE % t, 'serie', 1, {
-                             'link': link, 'pg-size': 10}, cm)
 
-    def initFavourites(self):
-        fav = self.addon.getSetting("fav")
-        if fav:
-            try:
-                favList = eval(fav)
-                for title, link in favList.items():
-                    self.favourites[title] = link
-            except:
-                pass
+	def handleMain(self, pg, args):
+		# --- All programs:
+		self.addViewLink(self.HIGHLIGHTED % self.lang(30020), 'programs', 1)
+		
+		self.addViewLink(self.HIGHLIGHTED % self.lang(30021), 'search', 1, { "pg-size": 1000 })
+		
+		# --- Time:
+		# newest episodes:
+		self.addViewLink(self.lang(30030), 'inline', 1, {'link': 'http://www.ruutu.fi/component/1567/update?media_type=video_episode&orderby=&publishing_channel=nelonenmedia&order_direction=desc&limit=30', 'grouping': True, 'pg-size': 15})
+		# most watched during one week:
+		self.addViewLink(self.lang(30031), 'inline', 1,
+						 {'link': 'http://www.ruutu.fi/component/527/update?media_type=video_episode&orderby=popularity_weekly&publishing_channel=nelonenmedia&order_direction=desc&limit=30', 'pg-size': 15})
+		
+		# --- Category:
+		# Drama
+		self.addViewLink(self.lang(30050), 'category', 1,
+						 {'link': 'http://www.ruutu.fi/component/218/update?has_episode_videos=1&internalclass=4%2C5&orderby=ruutu&order_direction=desc&internalsubclass=2%2C3&limit=100', 'grouping': True, 'pg-size': 10})
 
-    def isFavourite(self, title):
-        return title in self.favourites
+		# Thrillers
+		self.addViewLink(self.lang(30051), 'category', 1,
+						 {'link': 'http://www.ruutu.fi/component/219/update?has_episode_videos=1&internalclass=4%2C5&orderby=ruutu&order_direction=desc&internalsubclass=1&limit=100', 'grouping': True, 'pg-size': 10})
+		
+		# Domestic
+		self.addViewLink(self.lang(30052), 'category', 1,
+						 {'link': 'http://www.ruutu.fi/component/536/update?has_episode_videos=1&internalclass=4&orderby=ruutu&order_direction=desc&internalsubclass=4%2C5%2C7&limit=100', 'grouping': True, 'pg-size': 10})
+		
+		# Foreign
+		self.addViewLink(self.lang(30053), 'category', 1,
+						 {'link': 'http://www.ruutu.fi/component/555/update?has_episode_videos=1&internalclass=5&orderby=ruutu&order_direction=desc&internalsubclass=4%2C5%2C7&limit=100', 'grouping': True, 'pg-size': 10})
 
-    @staticmethod
-    def getPageQuery(pg):
-        return str(pg - 1) if pg > 0 else ''
+		# Entertainment & Music
+		self.addViewLink(self.lang(30054), 'category', 1,
+						 {'link': 'http://www.ruutu.fi/component/557/update?has_episode_videos=1&internalclass=4%2C5&orderby=ruutu&order_direction=desc&internalsubclass=5&limit=100', 'grouping': True, 'pg-size': 10})
 
-    def handleCategory(self, pg, args):
-        link = args['link'] + self.getPageQuery(pg) if 'link' in args else ''
-        if link != '':
-            items = scrapPager(link)
-            self.listItems(items, pg, args, 'category', True)
+		# Talkshows
+		self.addViewLink(self.lang(30055), 'category', 1,
+						 {'link': 'http://www.ruutu.fi/component/558/update?has_episode_videos=1&internalclass=4%2C5&orderby=ruutu&order_direction=desc&internalsubclass=7&limit=100', 'grouping': True, 'pg-size': 10})
 
-    def handleSeries(self, pg, args):
-        link = args['link'] if 'link' in args else ''
-        if link != '':
-            self.listItems(scrapSeries(link, pg), pg, args, 'serie', False)
+		# Reality
+		self.addViewLink(self.lang(30056), 'category', 1,
+						 {'link': 'http://www.ruutu.fi/component/544/update?has_episode_videos=1&internalclass=4%2C5&orderby=ruutu&order_direction=desc&internalsubclass=8&limit=100', 'grouping': True, 'pg-size': 10})
+		
+		# Lifestyle
+		self.addViewLink(self.lang(30057), 'category', 1,
+						 {'link': 'http://www.ruutu.fi/component/537/update?has_episode_videos=1&internalclass=4%2C5&orderby=ruutu&order_direction=desc&internalsubclass=6%2C9&limit=100', 'grouping': True, 'pg-size': 10})
 
-    def listItems(self, items, pg, args, handler, markFav=False):
-        grouping = args['grouping'] if 'grouping' in args else False
-        pgSize = int(args['pg-size']) if 'pg-size' in args else -1
-        groupName = ''
-        if items is not None:
-            xbmcplugin.setContent(int(sys.argv[1]), 'episodes')
-            for item in items:
-                if grouping and groupName != formatDate(item['published-ts']):
-                    groupName = formatDate(item['published-ts'])
-                    self.addVideoLink(self.GROUP_FORMAT % groupName, '', '')
+		# Domestic movies
+		self.addViewLink(self.lang(30058), 'inline', 1,
+						 {'link': 'http://www.ruutu.fi/component/539/update?internalclass=6&orderby=created&order_direction=desc&internalsubclass=1&limit=100', 'grouping': True, 'pg-size': 10})
+		
+		# Foreign movies
+		self.addViewLink(self.lang(30059), 'inline', 1,
+						 {'link': 'http://www.ruutu.fi/component/606/update?internalclass=6&orderby=created&order_direction=desc&internalsubclass=2&limit=100', 'grouping': True, 'pg-size': 10})
 
-                title = item['title']
-                if markFav and self.isFavourite(title):
-                    title = self.FAVOURITE % title
-                if len(item['details']) > 0:
-                    title += ': ' + item['details']
-                    if len(title) > 50:
-                        title = title[:50] + u'…'
-                if len(item['episodeNum']) > 0 and len(item['seasonNum']) > 0:
-                    title += ' [%s#%s]' % (item[
-                                           'seasonNum'], item['episodeNum'])
+		# Documents
+		self.addViewLink(self.lang(30060), 'category', 1,
+						 {'link': 'http://www.ruutu.fi/component/538/update?has_episode_videos=1&internalclass=2&orderby=ruutu&order_direction=desc&internalsubclass=1&limit=100', 'grouping': True, 'pg-size': 10})
 
-                av = item['available']
-                expiresInHours = int((int(av) - time.time()) / (60 * 60))
+		# News
+		self.addViewLink(self.lang(30061), 'inline', 1,
+						 {'link': 'http://www.ruutu.fi/component/214/update?series=1377550&media_type=video_clip&orderby=popularity_weekly&order_direction=desc&limit=100', 'grouping': True, 'pg-size': 10})
 
-                availableText = item['available-text']
-                if 24 > expiresInHours >= 0:
-                    title = self.EXPIRES_HOURS % (expiresInHours, title)
-                    availableText = '[COLOR red]%s[/COLOR]' % availableText
-                elif 120 >= expiresInHours >= 0:
-                    title = self.EXPIRES_DAYS % (expiresInHours / 24, title)
-                    availableText = '[COLOR red]%s[/COLOR]' % availableText
+		# Weather
+		self.addViewLink(self.lang(30062), 'category', 1,
+						 {'link': 'http://www.ruutu.fi/component/215/update?has_episode_videos=1&internalclass=4%2C5&orderby=ruutu&order_direction=desc&internalsubclass=1&limit=100', 'grouping': True, 'pg-size': 10})
+		
 
-                plot = '[B]%s[/B]\n\r%s\n\r%s' % (item[
-                                                  'details'], item['desc'], availableText)
+		# Children
+		self.addViewLink(self.lang(30063), 'category', 1,
+						 {'link': 'http://www.ruutu.fi/component/310/update?has_videos=1&internalclass=7&orderby=ruutu&order_direction=desc&limit=100', 'grouping': True, 'pg-size': 10})
+		
+		# Children's movies
+		self.addViewLink(self.lang(30064), 'inline', 1,
+						 {'link': 'http://www.ruutu.fi/component/584/update?media_type=video_episode&internalclass=6&themes=18&orderby=created&order_direction=desc&limit=100', 'grouping': True, 'pg-size': 10})
 
-                episodeNum = item['episodeNum']
-                seasonNum = item['seasonNum']
-                contextMenu = []
+		
+		for title, link in self.favourites.items():
+			t = title
+			cm = [(self.createContextMenuAction(self.REMOVE, 'removeFav', {'name': t}) )]
+			self.addViewLink(self.FAVOURITE % t, 'serie', 1, {'link': link, 'pg-size': 10}, cm)
 
-                if self.enabledDownload:
-                    contextMenu.append(
-                        (self.createContextMenuAction('Download',
-                                                      'download',
-                                                      {'videoLink': item['link'],
-                                                       'title': item['title']})))
-                if item['published-ts'] is not None:
-                    aired = item['published-ts'].strftime('%Y-%m-%d')
-                else:
-                    aired = ''
-                self.addVideoLink(title, item['link'], item['image'],
-                                  infoLabels={'plot': plot,
-                                              'season': seasonNum,
-                                              'episode': episodeNum,
-                                              'aired': aired,
-                                              'duration': item['duration']},
-                                  contextMenu=contextMenu)
-            if len(items) > 0 and len(items) >= pgSize:
-                self.addViewLink(self.NEXT, handler, pg + 1, args)
+	def initFavourites(self):
+		fav = self.addon.getSetting("fav")
+		if fav:
+			try:
+				favList = eval(fav)
+				for title, link in favList.items():
+					self.favourites[title] = link
+			except:
+				pass
 
-    def handleSeriesJSON(self, pg, args):
-        if 'link' in args:
-            items = scrapJSON(args['link'])
-            for item in items['video_episode']:
-                link = 'http://arkisto.ruutu.fi/video?vt=video_episode&vid=' + \
-                    item['video_filename'][:-4]
-                image = 'http://arkisto.ruutu.fi/' + item['video_preview_url']
-                self.addVideoLink(item['title'], link, image, '')
 
-    def handlePrograms(self, pg, args):
-        serieList = scrapPrograms()
-        for serie in serieList:
-            try:
-                title = serie['name'].encode('utf-8').replace('&#039;', "'")
-                menu = [(
-                    self.createContextMenuAction(
-                        self.FAVOURITE % self.lang(30017),
-                        'addFav', {'name': serie['name'], 'link': serie['link']}))]
-                if self.isFavourite(title):
-                    title = self.FAVOURITE % title
-                    menu = [(self.createContextMenuAction(
-                        self.REMOVE, 'removeFav', {'name': serie['name']}))]
+	def isFavourite(self, title):
+		return title in self.favourites
 
-                self.addViewLink(title, 'serie', 1, {
-                                 'link': serie['link'], 'pg-size': 1000}, menu)
-            except:
-                pass
+	@staticmethod
+	def getPageQuery(pg):
+		return str(pg - 1) if pg > 0    else ''
+	
+	def handleSearch(self, pg, args):
+		def getContent(video, bitrate):
+			videoId = video.get('data-content-id')
+			isPremium = video.find('div', {'class': 'ruutuplus-text' }) is not None
+			if HIDE_PREMIUM_CONTENT and isPremium:
+				return None
+			return getVideoDetails(videoId, bitrate, True)
 
-    def handleAction(self, action, params):
-        if action == 'addFav':
-            self.favourites[params['name'].encode("utf-8")] = params['link']
-            favStr = repr(self.favourites)
-            self.addon.setSetting('fav', favStr)
-            xbmcUtil.notification(self.lang(
-                30006), params['name'].encode("utf-8"))
-        elif action == 'removeFav':
-            self.favourites.pop(params['name'])
-            favStr = repr(self.favourites)
-            self.addon.setSetting('fav', favStr)
-            xbmcUtil.notification(self.lang(
-                30007), params['name'].encode("utf-8"))
-        elif action == 'download':
-            downloadVideo(params['videoLink'], params['title'])
-        else:
-            super(ViewAddonAbstract, self).handleAction(self, action, params)  # NOQA
+		def scrapSearch(bs, bitrate, pg):
+			videos = bs.findAll('div', attrs={ 'data-content-type': 'video', 'data-content-id': True })
+			results = []
+			for index, video in enumerate(videos):
+				content = getContent(video, bitrate)
+				if content:
+					results.append(content)
+				if index >= 30:
+					# safeguard to limit too long searches
+					break
+			return results
+				
+				
+		searchUrlTemplate = 'http://www.ruutu.fi/ruutu_search/search-content-freetext/SEARCH_STRING'
+		keyboard = xbmc.Keyboard()
+		keyboard.setHeading(self.lang(30080))
+		keyboard.doModal()
+		if (keyboard.isConfirmed() and keyboard.getText() != ''):
+			query = keyboard.getText()
+			url = searchUrlTemplate.replace('SEARCH_STRING', query)
+			resultList = scrapJSON(url)
+			content = resultList[1].get('data')
+			bs = BeautifulSoup(content, 'html.parser')
+			self.listItems(scrapSearch(bs, self.bitrate, pg), pg, args, 'inline', True)
+	
+	def handleCategory(self, pg, args):
+		def scrapCategory(url, pg=1):
+			xbmc.log(url)
+			req = urllib2.Request(url)
+			req.add_header('User-Agent', USER_AGENT)
+			response = urllib2.urlopen(req)
+			content = response.read()
+			response.close()
+		
+			resultObj = scrapJSON(url)
+			seriesTagList = resultObj.get('items', [])
+		
+			for seriesTag in seriesTagList:
+				#try:
+				bs = BeautifulSoup(seriesTag, 'html.parser')
+				isPremium = bs.find('div', {'class': 'ruutuplus-text'}) is not None
+				if HIDE_PREMIUM_CONTENT and isPremium:
+					continue
+		
+				seriesId = bs.find('div', attrs={ 'data-content-id': True }).get('data-content-id')
+				episodesLink = getEpisodesLink(seriesId)
+				title = bs.find('h4', {'class': 'thumbnail-title'}).text
+				# note the change in handler name
+				self.addViewLink(title, 'serie', 1, {'link': episodesLink, 'pg-size': 100})
+				#except:
+				#	pass
+		
+		link = args['link'] if 'link' in args else ''
+		if link != '':
+			self.listItems(scrapCategory(link, pg), pg, args, 'category', False)
 
-    def handleVideo(self, link):
-        videoLink = scrapVideoLink(link)
-        return videoLink
+	def handleInline(self, pg, args):
+		link = args.get('link', '')
+		pageSize = args.get('pg-size', 15)
+		#checkLinkOffset(link, pageSize, pg)
+		if link != '':
+			self.listItems(scrapInline(link, self.bitrate, pg), pg, args, 'time', True)
 
-# -----------------------------------
+	def handleSeries(self, pg, args):
+		link = args['link'] if 'link' in args else ''
+		if link != '':
+			self.listItems(scrapSeries(link, self.bitrate, pg), pg, args, 'serie', False)
+
+	def listItems(self, items, pg, args, handler, markFav=False):
+		grouping = args.get('grouping', False)
+		pgSize = args.get('pg-size', -1)
+		groupName = ''
+		if items is not None:
+			xbmcplugin.setContent(int(sys.argv[1]), 'episodes')
+			for item in items:
+				if not item:
+					continue # may be None due to fetch errors
+
+				title = item['title']
+				if markFav and self.isFavourite(title):
+					title = self.FAVOURITE % title
+				# truncate if necessary:
+				#if len(title) > 50:
+				#	title = title[:50] + u'…'
+				if item.get('episodeNum') and item.get('seasonNum'):
+					title += ' (S%sE%s)' % (item['seasonNum'], item['episodeNum'])
+
+				#av = item['available']
+				#expiresInHours = int((int(av) - time.time()) / (60 * 60))
+
+				#availableText = item['available-text']
+				#if 24 > expiresInHours >= 0:
+				#	title = self.EXPIRES_HOURS % (expiresInHours, title)
+				#	availableText = '[COLOR red]%s[/COLOR]' % availableText
+				#elif 120 >= expiresInHours >= 0:
+				#	title = self.EXPIRES_DAYS % (expiresInHours / 24, title)
+				#	availableText = '[COLOR red]%s[/COLOR]' % availableText
+
+				plot = '[B]%s[/B]\n\r%s' % (item['details'], item['desc'])
+				contextMenu = []
+
+				if self.enabledDownload:
+					contextMenu.append((self.createContextMenuAction('Download', 'download', {'videoLink': item['link'], 'title': item['title']}) ))
+				if item.get('published-ts') is not None:
+					aired = item.get('published-ts').strftime('%Y-%m-%d')
+				else:
+					aired = None
+				self.addVideoLink(title, item['link'], item['image'],
+								  infoLabels={'plot': plot, 'season': item.get('seasonNum', None), 'episode': item.get('episodeNum', None), 'aired': aired, 'duration': item['duration']}, contextMenu=contextMenu)
+			if len(items) > 0 and len(items) >= pgSize:
+				self.addViewLink(self.NEXT, handler, pg + 1, args)
+
+	def handlePrograms(self, pg, args):
+		serieList = scrapPrograms()
+		for serie in serieList:
+			try:
+				title = serie.get('name').encode('utf-8').replace('&#039;', "'")
+				menu = [(self.createContextMenuAction(self.FAVOURITE % self.lang(30017), 'addFav', serie) )]
+				episodesLink = getEpisodesLink( str(serie.get('seriesId')) )
+				if self.isFavourite(title):
+					title = self.FAVOURITE % title
+					menu = [(self.createContextMenuAction(self.REMOVE, 'removeFav', serie) )]
+				self.addViewLink(title, 'serie', 1, {'link': episodesLink, 'pg-size': 100}, menu)
+			except:
+				pass
+
+	def handleAction(self, action, params):
+		if action == 'addFav':
+			self.favourites[params['name'].encode("utf-8")] = params['link']
+			favStr = repr(self.favourites)
+			self.addon.setSetting('fav', favStr)
+			xbmcUtil.notification(self.lang(30006), params['name'].encode("utf-8"))
+		elif action == 'removeFav':
+			self.favourites.pop(params['name'])
+			favStr = repr(self.favourites)
+			self.addon.setSetting('fav', favStr)
+			xbmcUtil.notification(self.lang(30007), params['name'].encode("utf-8"))
+		elif action == 'download':
+			downloadVideo(params['videoLink'], params['title'])
+		else:
+			super(ViewAddonAbstract, self).handleAction(self, action, params)
+
+	def handleVideo(self, link):
+		return link
+
+#-----------------------------------
+
 ruutu = RuutuAddon()
 lang = ruutu.lang
 ruutu.handle()

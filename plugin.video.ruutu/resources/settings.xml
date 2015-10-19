@@ -4,5 +4,8 @@
     <setting id="enable-download" type="bool" label="Enable download" default="false" />	
     <setting id="download-path" type="folder" label="Download path" default="" />
   </category>
+  <category label="Bandwidth">
+  	<setting id="bitrate" type="select" label="Video quality" values="720p|576p|432p|288p" default="720p" />
+  </category>
 
 </settings>
