@@ -198,7 +198,7 @@ def getVideoDetails(videoId, bitrate, isCategoryFetch=False):
 		# extract the episode name for the listing:
 		episodeCode = xmlsoup.find(low('PassthroughVariables')).find('variable', {'name': 'episode_code'}).get('value')
 		epInfo = getSeasonAndEpisodeNum(episodeCode)
-		link = getModifiedVideoUrl(xmlsoup.find(low('HTTPMediaFile')).text)
+		link = getModifiedVideoUrl(xmlsoup.find(low('CastMediaFile')).text)
 		image = xmlsoup.find(low('Startpicture')).get('href', '') if xmlsoup.find(low('Startpicture')) else ''
 		duration = getDuration(xmlsoup)
 		publishedTs = getPublishedTime(program.get('start_time'))
