@@ -38,6 +38,9 @@
     <string id="30060">Documents</string>
     <string id="30061">News</string>
     <string id="30062">Weather</string>
-    <string id="30063">Children's programs</string>
-    <string id="30064">Children's movies</string>
+    <string id="30063">Children</string>
+    <string id="30064">Toddlers</string>
+    <string id="30065">Preschoolers</string>
+    <string id="30066">Schoolchildren</string>
+    <string id="30067">Children's movies</string>
 </strings>

@@ -389,10 +389,19 @@ class RuutuAddon(xbmcUtil.ViewAddonAbstract):
 
 		# Children
 		self.addViewLink(self.lang(30063), 'category', 1,
-						 {'link': 'http://www.ruutu.fi/component/310/update?has_videos=1&internalclass=7&orderby=ruutu&order_direction=desc&limit=100', 'grouping': True, 'pg-size': 10})
+						 {'link': 'http://www.ruutu.fi/component/670/update?has_episode_videos=1&internalclass=2&orderby=ruutu&order_direction=desc&internalsubclass=1&limit=100', 'grouping': True, 'pg-size': 10})
+		# Toddlers
+		self.addViewLink(self.lang(30064), 'category', 1,
+						 {'link': 'http://www.ruutu.fi/component/319/update?has_videos=1&internalclass=7&orderby=ruutu&order_direction=desc&limit=100', 'grouping': True, 'pg-size': 10})
+		# Preschoolers
+		self.addViewLink(self.lang(30065), 'category', 1,
+						 {'link': 'http://www.ruutu.fi/component/320/update?has_videos=1&internalclass=7&orderby=ruutu&order_direction=desc&limit=100', 'grouping': True, 'pg-size': 10})
+		# Schoolchildren
+		self.addViewLink(self.lang(30066), 'category', 1,
+						 {'link': 'http://www.ruutu.fi/component/321/update?has_videos=1&internalclass=7&orderby=ruutu&order_direction=desc&limit=100', 'grouping': True, 'pg-size': 10})
 		
 		# Children's movies
-		self.addViewLink(self.lang(30064), 'inline', 1,
+		self.addViewLink(self.lang(30067), 'inline', 1,
 						 {'link': 'http://www.ruutu.fi/component/584/update?media_type=video_episode&internalclass=6&themes=18&orderby=created&order_direction=desc&limit=100', 'grouping': True, 'pg-size': 10})
 
 		
